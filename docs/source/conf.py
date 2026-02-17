@@ -1,45 +1,32 @@
 #!/usr/bin/env python3
 project = 'YosysHQ AppNote-123'
 author = 'YosysHQ GmbH'
-copyright ='2024 YosysHQ GmbH'
-
-templates_path = ['_templates']
+copyright = '2026 YosysHQ GmbH'
 
 # select HTML theme
-html_theme = "furo"
-
-# copy static folders to the documentation's HTML output
-html_static_path = ['_static', '_images']
-
-# setup logo and css
-html_logo = '_static/logo.png'
-html_favicon = '_static/favico.png'
+html_theme = 'furo-ys'
 html_css_files = ['custom.css']
-
-# code blocks style 
-pygments_style = 'colorful'
-highlight_language = 'none'
-
-# branding for HTML
-html_theme_options = {
-    "sidebar_hide_name": True,
-
-    "light_css_variables": {
-        "color-brand-primary": "#d6368f",
-        "color-brand-content": "#4b72b8",
-        "color-api-name": "#8857a3",
-        "color-api-pre-name": "#4b72b8",
-        "color-link": "#8857a3",
-    },
-
-    "dark_css_variables": {
-        "color-brand-primary": "#e488bb",
-        "color-brand-content": "#98bdff",
-        "color-api-name": "#8857a3",
-        "color-api-pre-name": "#4b72b8",
-        "color-link": "#be95d5",
-    },
+html_theme_options: dict[str, str] = {
+    "source_repository": "https://github.com/YosysHQ/eqy/",
+    "source_branch": "main",
+    "source_directory": "docs/source/",
 }
 
-# extensions
+# These folders are copied to the documentation's HTML output
+html_static_path = ['_static']
+
+# code blocks style 
+highlight_language = 'none'
+
+# generate section labels from their heading
 extensions = ['sphinx.ext.autosectionlabel']
+
+# ensure that autosectionlabel will produce unique names
+autosectionlabel_prefix_document = True
+
+from sphinx.application import Sphinx
+def setup(app: Sphinx) -> None:
+    from furo_ys.lexers.SBYLexer import SBYLexer
+    app.add_lexer("sby", SBYLexer)
+    from furo_ys.lexers.YoscryptLexer import YoscryptLexer
+    app.add_lexer("yoscrypt", YoscryptLexer)
