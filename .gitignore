@@ -1,0 +1,22 @@
+.DS_Store
+
+# Third-party design checkouts are fetched by the app-note make targets.
+/veer/Cores-VeeR-EH1/
+/veer/SVA-AXI4-FVIP/
+/cv32e40x/core-v-verif/
+/pspin/pspin/
+
+# Per-target SBY/Yosys work directories are large and reproducible.
+/exports/work/
+
+# Compressed model payloads are committed; raw generated payloads stay local.
+/exports/models/*.btor2
+/exports/models/*.aag
+/exports/models/*.aig
+!/exports/models/*.btor2.gz
+!/exports/models/*.aag.gz
+!/exports/models/*.aig.gz
+
+# Not included as benchmark artifacts.
+/exports/models/pspin_soc_dma_wrap.*
+/exports/models/pspin_pulp_cluster.*

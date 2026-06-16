@@ -1,0 +1,3 @@
+init 33274 0 dut_wrap.cv32e40x_wrapper_i.core_i.sleep_unit_i.core_clock_gate_i.clk_en_gd
+latch 36247 0 dut_wrap.cv32e40x_wrapper_i.core_i.sleep_unit_i.core_clock_gate_i.clk_en_gd
+latch 36248 0 formal_setup_inst.clk
