@@ -7,9 +7,12 @@ symbiotic_root="${SYMBIOTIC_ROOT:-/Users/huguangyu/orb_env/tabbycad/symbiotic-20
 symbiotic_license="${SYMBIOTIC_LICENSE:-/Users/huguangyu/orb_env/tabbycad/symbiotic.lic}"
 sby_bin="${SBY_BIN:-/Users/huguangyu/coding_env/oss-cad-suite/bin/sby}"
 yosys_bin="${YOSYS_BIN:-$symbiotic_root/bin/yosys}"
+export_yosys_bin="${EXPORT_YOSYS_BIN:-/Users/huguangyu/coding_env/oss-cad-suite/bin/yosys}"
+orb_machine="${ORB_MACHINE:-ubuntu-amd64-22}"
+tabby_yosys_mode="${TABBY_YOSYS_MODE:-auto}"
+export_yosys_mode="${EXPORT_YOSYS_MODE:-native}"
 
 export SYMBIOTIC_LICENSE="$symbiotic_license"
-export PATH="$symbiotic_root/bin:$PATH"
 
 default_targets=(
   "veer:bmc"
@@ -17,6 +20,7 @@ default_targets=(
   "cv32e40x:bmc"
   "pspin:riscv_core"
   "pspin:core_region"
+  "pspin:pulp_cluster"
 )
 
 if (($#)); then
@@ -28,6 +32,57 @@ fi
 models_dir="$repo_root/exports/models"
 work_root="$repo_root/exports/work"
 mkdir -p "$models_dir" "$work_root"
+
+detect_tabby_yosys_mode() {
+  case "$tabby_yosys_mode" in
+    native|orb) echo "$tabby_yosys_mode" ;;
+    auto)
+      if "$yosys_bin" -V >/dev/null 2>&1; then
+        echo native
+      elif command -v orb >/dev/null 2>&1; then
+        echo orb
+      else
+        echo "Tabby Yosys is not executable natively and orb is not available" >&2
+        return 1
+      fi
+      ;;
+    *)
+      echo "invalid TABBY_YOSYS_MODE='$tabby_yosys_mode' (expected auto, native, or orb)" >&2
+      return 1
+      ;;
+  esac
+}
+
+tabby_yosys_mode="$(detect_tabby_yosys_mode)"
+
+run_tabby_yosys() {
+  if [[ "$tabby_yosys_mode" == "native" ]]; then
+    env \
+      SYMBIOTIC_LICENSE="$symbiotic_license" \
+      PATH="$symbiotic_root/bin:$PATH" \
+      "$yosys_bin" "$@"
+  else
+    orb -m "$orb_machine" env \
+      SYMBIOTIC_LICENSE="$symbiotic_license" \
+      PATH="$symbiotic_root/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+      "$yosys_bin" "$@"
+  fi
+}
+
+run_export_yosys() {
+  case "$export_yosys_mode" in
+    native)
+      "$export_yosys_bin" "$@"
+      ;;
+    tabby)
+      run_tabby_yosys "$@"
+      ;;
+    *)
+      echo "invalid EXPORT_YOSYS_MODE='$export_yosys_mode' (expected native or tabby)" >&2
+      return 1
+      ;;
+  esac
+}
 
 setup_cv32e40x_env() {
   local base="$repo_root/cv32e40x/core-v-verif"
@@ -284,12 +339,37 @@ from pathlib import Path
 path = Path(sys.argv[1])
 lines = path.read_text().splitlines()
 out = []
+inserted_proc = False
 for line in lines:
-    if line.strip() == "prep -flatten":
-        out.append("# skipped for Tabby Yosys 2020: prep -flatten")
+    if line.strip() in {"flatten", "prep -flatten"}:
+        out.append(f"# skipped for Tabby Yosys 2020: {line.strip()}")
+    elif line.strip().startswith("chformal -assert -assert2assume "):
+        if not inserted_proc:
+            out.append("# generate formal cells before applying non-flattened selectors")
+            out.append("proc")
+            inserted_proc = True
+        line = line.replace("pulp_cluster_wrapper/*.", "*/")
+        line = line.replace("pulp_cluster_wrapper/*", "*/*")
+        out.append(line)
     else:
         out.append(line)
 path.write_text("\n".join(out) + "\n")
+PY
+}
+
+patch_cutpoints() {
+  local script="$1"
+  python3 - "$script" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace(
+    r"cutpoint t:\$mul t:\$mem_v2",
+    r"cutpoint t:\$mul t:\$mem_v2 t:\$mem",
+)
+path.write_text(text)
 PY
 }
 
@@ -313,6 +393,42 @@ setundef -undriven -anyseq
 opt -fast
 stat
 write_rtlil ../model/design_prep.il
+YOSYS
+}
+
+write_frontend_script() {
+  local output="$1"
+  cat >> "$output" <<'YOSYS'
+
+# Keep Tabby/Verific work minimal; lower and optimize with native Yosys.
+write_rtlil ../model/design_frontend.il
+YOSYS
+}
+
+write_native_prepare_script() {
+  local output="$1"
+  local top="$2"
+  cat > "$output" <<YOSYS
+read_rtlil design_frontend.il
+hierarchy -top $top
+
+# SBY-compatible preparation after Verific import; no license needed here.
+proc
+opt_clean
+scc -select
+simplemap
+select -clear
+memory_nordff
+clk2fflogic
+opt_clean
+chformal -live -fair -cover -remove
+opt_clean
+# The full PSpin cluster emits thousands of no-driver diagnostics here. That
+# check is only diagnostic and dominates runtime, so keep the export path lean.
+setundef -undriven -anyseq
+opt -fast
+stat
+write_rtlil design_prep.il
 YOSYS
 }
 
@@ -359,6 +475,74 @@ write_aiger -ascii -I -B -zinit -map $name.ascii.aim -symbols $name.aag
 YOSYS
 }
 
+patch_export_scripts_for_model() {
+  local model="$1"
+  local btor_script="$2"
+  local aiger_script="$3"
+
+  if [[ "$model" != "pspin_pulp_cluster" ]]; then
+    return
+  fi
+
+  python3 - "$btor_script" "$aiger_script" <<'PY'
+import sys
+from pathlib import Path
+
+for script in map(Path, sys.argv[1:]):
+    text = script.read_text()
+    text = text.replace("hierarchy -check\n", "")
+    script.write_text(text)
+PY
+}
+
+sanitize_rtlil_const_outputs() {
+  local input="$1"
+  local tmp="${input%.il}.sanitized.il"
+
+  python3 "$repo_root/scripts/sanitize_rtlil_const_outputs.py" "$input" "$tmp"
+  mv "$tmp" "$input"
+}
+
+compress_model_payloads() {
+  local name="$1"
+  gzip -9 -n -k -f \
+    "$models_dir/$name.btor2" \
+    "$models_dir/$name.aig" \
+    "$models_dir/$name.aag"
+  split_large_compressed_payloads \
+    "$models_dir/$name.btor2.gz" \
+    "$models_dir/$name.aig.gz" \
+    "$models_dir/$name.aag.gz"
+}
+
+split_large_compressed_payloads() {
+  python3 - "$@" <<'PY'
+import sys
+from pathlib import Path
+
+limit = 90 * 1024 * 1024
+
+for arg in sys.argv[1:]:
+    path = Path(arg)
+    for stale in path.parent.glob(path.name + ".part*"):
+        stale.unlink()
+    if not path.exists() or path.stat().st_size <= limit:
+        continue
+
+    with path.open("rb") as src:
+        index = 0
+        while True:
+            chunk = src.read(limit)
+            if not chunk:
+                break
+            part = path.with_name(f"{path.name}.part{index:02d}")
+            part.write_bytes(chunk)
+            index += 1
+    path.unlink()
+    print(f"split {path} into {index} part(s)")
+PY
+}
+
 run_target() {
   local target="$1"
   local design="${target%%:*}"
@@ -377,6 +561,8 @@ run_target() {
   local work_dir="$work_root/$name"
 
   echo "==> $target"
+  echo "    Tabby Yosys: $tabby_yosys_mode"
+  echo "    Export Yosys: $export_yosys_mode"
   rm -rf "$work_dir"
 
   if [[ "$design" == "cv32e40x" ]]; then
@@ -397,22 +583,40 @@ run_target() {
   local base_ys="$work_dir/src/export_prepare.ys"
   extract_script "$work_dir/config.sby" "$base_ys"
   (cd "$work_dir/src" && rewrite_frontend_commands "$base_ys" "$design")
-  sed -i 's/cutpoint t:\$mul t:\$mem_v2/cutpoint t:\$mul t:\$mem_v2 t:\$mem/' "$base_ys"
+  patch_cutpoints "$base_ys"
   patch_prepare_script_for_model "$name" "$base_ys"
-  write_prepared_script "$base_ys"
+
+  if [[ "$name" == "pspin_pulp_cluster" ]]; then
+    write_frontend_script "$base_ys"
+  else
+    write_prepared_script "$base_ys"
+  fi
 
   (
     cd "$work_dir/src"
-    "$yosys_bin" -ql ../model/export_prepare.log export_prepare.ys
+    run_tabby_yosys -ql ../model/export_prepare.log export_prepare.ys
   )
+
+  if [[ "$name" == "pspin_pulp_cluster" ]]; then
+    write_native_prepare_script "$work_dir/model/export_native_prepare.ys" "pulp_cluster_wrapper"
+    (
+      cd "$work_dir/model"
+      run_export_yosys -ql export_native_prepare.log export_native_prepare.ys
+    )
+    sanitize_rtlil_const_outputs "$work_dir/model/design_prep.il"
+  fi
 
   write_btor_script "$work_dir/model/export_btor.ys" "$name"
   write_aiger_script "$work_dir/model/export_aiger.ys" "$name"
+  patch_export_scripts_for_model \
+    "$name" \
+    "$work_dir/model/export_btor.ys" \
+    "$work_dir/model/export_aiger.ys"
 
   (
     cd "$work_dir/model"
-    "$yosys_bin" -ql export_btor.log export_btor.ys
-    "$yosys_bin" -ql export_aiger.log export_aiger.ys
+    run_export_yosys -ql export_btor.log export_btor.ys
+    run_export_yosys -ql export_aiger.log export_aiger.ys
   )
 
   cp "$work_dir/model/$name.btor2" "$models_dir/"
@@ -421,6 +625,7 @@ run_target() {
   cp "$work_dir/model/$name.aag" "$models_dir/"
   cp "$work_dir/model/$name.aim" "$models_dir/"
   cp "$work_dir/model/$name.ascii.aim" "$models_dir/"
+  compress_model_payloads "$name"
 }
 
 for target in "${targets[@]}"; do

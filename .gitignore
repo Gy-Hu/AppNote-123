@@ -1,4 +1,5 @@
 .DS_Store
+__pycache__/
 
 # Third-party design checkouts are fetched by the app-note make targets.
 /veer/Cores-VeeR-EH1/
@@ -17,6 +18,10 @@
 !/exports/models/*.aag.gz
 !/exports/models/*.aig.gz
 
+# Full PSpin cluster AIGER gzip files exceed GitHub's normal file limit; commit
+# their split parts instead.
+/exports/models/pspin_pulp_cluster.aag.gz
+/exports/models/pspin_pulp_cluster.aig.gz
+
 # Not included as benchmark artifacts.
 /exports/models/pspin_soc_dma_wrap.*
-/exports/models/pspin_pulp_cluster.*
